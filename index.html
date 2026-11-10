@@ -85,8 +85,13 @@
     margin-top: 2px; width: 100%; padding: 8px; border-radius: 10px; border: 0;
     background: var(--surface-2); color: var(--text); font-weight: 600; font-size: 13px; pointer-events: none;
   }
-  .card:hover .copy { background: var(--accent); }
-  .card.copied .copy { background: var(--ok); color: #06281a; }
+  .card:not(.multi):hover .copy { background: var(--accent); }
+  .copy.done { background: var(--ok) !important; color: #06281a !important; }
+  .fmts { display: flex; gap: 6px; width: 100%; }
+  .fmts .pick { flex: 1; min-width: 0; white-space: nowrap; justify-content: center; min-height: 38px; pointer-events: auto; cursor: pointer; display: flex; flex-direction: column; align-items: center; line-height: 1.2; }
+  .fmts .pick small { font-size: 10.5px; font-weight: 500; opacity: .65; }
+  .fmts .pick:hover { background: var(--accent); }
+  .fmts .pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
   .state { text-align: center; color: var(--muted); padding: 60px 0; }
   .spinner { width: 28px; height: 28px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; margin: 0 auto 12px; }
@@ -104,6 +109,7 @@
     box-shadow: 0 10px 30px rgba(0,0,0,.4); transition: transform .25s ease; max-width: calc(100% - 32px);
     display: flex; gap: 10px; align-items: center;
   }
+  .toast span { white-space: nowrap; }
   .toast.show { transform: translate(-50%, 0); }
   .toast small { font-weight: 400; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46vw; }
 
@@ -175,7 +181,17 @@ const CONFIG = {
   repo: "nuviotv-icons",
   branch: "main",
   // Etichette delle cartelle (le cartelle non elencate usano il nome della cartella)
-  labels: { icons: "Personaggi", services: "Servizi streaming" },
+  labels: {
+    icons: "Personaggi",
+    "services-logo": "Servizi streaming - Logo",
+    "services-animation": "Servizi streaming - Animazione"
+  },
+  // Nomi brevi per i filtri in alto (se assenti si usa labels)
+  tabLabels: { "services-logo": "Loghi servizi", "services-animation": "Animazioni servizi" },
+  // Cartelle divise in sottogruppi in base al prefisso del file (logo-*, animation-*)
+  splitFolders: ["services"],
+  // Ordine dei formati quando la stessa immagine esiste in più versioni (il primo è quello di default)
+  formatOrder: ["webp", "gif", "png", "jpg", "jpeg", "avif", "svg"],
   // Cartelle mostrate come avatar tondi
   roundFolders: ["icons"],
   // Cartelle da nascondere
@@ -227,14 +243,26 @@ async function load() {
       return;
     }
   }
-  state.files = list
+  const rank = (ext) => { const i = CONFIG.formatOrder.indexOf(ext); return i < 0 ? 99 : i; };
+  const byBase = new Map();
+  list
     .filter((f) => f.path.includes("/"))
     .filter((f) => CONFIG.exts.includes(f.path.split(".").pop().toLowerCase()))
-    .map((f) => {
-      const parts = f.path.split("/");
+    .forEach((f) => {
+      const ext = f.path.split(".").pop().toLowerCase();
+      const base = f.path.slice(0, -(ext.length + 1));
+      if (!byBase.has(base)) byBase.set(base, []);
+      byBase.get(base).push({ ext, path: f.path, size: f.size });
+    });
+  state.files = [...byBase.entries()]
+    .map(([base, formats]) => {
+      formats.sort((a, b) => rank(a.ext) - rank(b.ext));
+      const parts = base.split("/");
       const file = parts.pop();
       const folder = parts[0];
-      return { ...f, file, folder, name: prettyName(file), kind: kindOf(file) };
+      const prefix = (file.match(/^(animation|logo)-/) || [])[1];
+      const group = CONFIG.splitFolders.includes(folder) && prefix ? `${folder}-${prefix}` : folder;
+      return { base, formats, path: formats[0].path, size: formats[0].size, file, folder, group, name: prettyName(file), kind: kindOf(file) };
     })
     .filter((f) => !CONFIG.hidden.includes(f.folder))
     .sort((a, b) => a.name.localeCompare(b.name, "it"));
@@ -244,33 +272,39 @@ async function load() {
 
 function folders() {
   const order = Object.keys(CONFIG.labels);
-  return [...new Set(state.files.map((f) => f.folder))]
+  return [...new Set(state.files.map((f) => f.group))]
     .sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99) || a.localeCompare(b));
 }
 const label = (f) => CONFIG.labels[f] || f.charAt(0).toUpperCase() + f.slice(1);
 
 function renderTabs() {
-  const tabs = [["all", "Tutte", state.files.length], ...folders().map((f) => [f, label(f), state.files.filter((x) => x.folder === f).length])];
+  const tabs = [["all", "Tutte", state.files.length], ...folders().map((f) => [f, CONFIG.tabLabels[f] || label(f), state.files.filter((x) => x.group === f).length])];
   $("#tabs").innerHTML = tabs.map(([id, name, n]) =>
     `<button class="tab" data-cat="${id}" aria-pressed="${state.cat === id}">${name}<span class="n">${n}</span></button>`).join("");
 }
 
 function card(f) {
   const round = CONFIG.roundFolders.includes(f.folder);
-  const meta = [f.kind, fmtSize(f.size)].filter(Boolean).join(" · ");
-  return `<button class="card${round ? " round" : ""}" data-path="${f.path}" title="Copia link di ${f.name}">
+  const multi = f.formats.length > 1;
+  const meta = multi ? f.formats.map((x) => x.ext.toUpperCase()).join(" · ")
+    : [f.group === f.folder ? f.kind : "", f.formats[0].ext.toUpperCase(), fmtSize(f.size)].filter(Boolean).join(" · ");
+  const actions = multi
+    ? `<div class="fmts">${f.formats.map((x) =>
+        `<span class="copy pick" role="button" tabindex="0" data-path="${x.path}" title="Copia link ${x.ext.toUpperCase()} (${fmtSize(x.size)})">${x.ext.toUpperCase()}<small>${fmtSize(x.size)}</small></span>`).join("")}</div>`
+    : `<span class="copy">Copia link</span>`;
+  return `<div class="card${round ? " round" : ""}${multi ? " multi" : ""}" role="button" tabindex="0" data-path="${f.path}" title="Copia link di ${f.name}">
     <div class="thumb"><img src="${urlFor(f.path, "jsdelivr")}" alt="${f.name}" loading="lazy" decoding="async"></div>
     <div><div class="name">${f.name}</div>${meta ? `<div class="meta">${meta}</div>` : ""}</div>
-    <span class="copy">Copia link</span>
-  </button>`;
+    ${actions}
+  </div>`;
 }
 
 function render() {
   const q = state.q.trim().toLowerCase();
-  const match = (f) => (state.cat === "all" || f.folder === state.cat) &&
+  const match = (f) => (state.cat === "all" || f.group === state.cat) &&
     (!q || f.name.toLowerCase().includes(q) || f.file.toLowerCase().includes(q));
   const html = folders().map((folder) => {
-    const items = state.files.filter((f) => f.folder === folder && match(f));
+    const items = state.files.filter((f) => f.group === folder && match(f));
     if (!items.length) return "";
     return `<section><h2>${label(folder)} · ${items.length}</h2><div class="grid">${items.map(card).join("")}</div></section>`;
   }).join("");
@@ -300,11 +334,18 @@ function toast(url) {
 
 $("#content").addEventListener("click", async (e) => {
   const c = e.target.closest(".card"); if (!c) return;
-  const url = urlFor(c.dataset.path);
+  const pick = e.target.closest(".pick");
+  // Su card con più formati si copia il formato toccato (o il primo se si tocca l'immagine)
+  const btn = pick || c.querySelector(".copy");
+  const url = urlFor(pick ? pick.dataset.path : c.dataset.path);
   await copy(url);
-  c.classList.add("copied"); c.querySelector(".copy").textContent = "Copiato ✓";
-  setTimeout(() => { c.classList.remove("copied"); c.querySelector(".copy").textContent = "Copia link"; }, 1600);
+  const old = btn.innerHTML;
+  btn.classList.add("done"); btn.textContent = pick ? "✓" : "Copiato ✓";
+  setTimeout(() => { btn.classList.remove("done"); btn.innerHTML = old; }, 1600);
   toast(url);
+});
+$("#content").addEventListener("keydown", (e) => {
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches(".card, .pick")) { e.preventDefault(); e.target.click(); }
 });
 $("#tabs").addEventListener("click", (e) => {
   const t = e.target.closest(".tab"); if (!t) return;
